@@ -17,7 +17,7 @@ typedef struct nanorq nanorq;
  It returns a new encoder configured with given parameters.
  K: number of source symbols
  T: size of each symbol in bytes
-K must be 1 ~ 56403. T isn't needed to be multiple of 4.
+K must be 1 ~ 56403. T doesn't need to be multiple of 4.
 */
 nanorq *nanorq_encoder_new(int K, unsigned int T);
 
@@ -156,7 +156,7 @@ Because all source symbols are repaired, calling this twice will be useless.
 int nanorq_repair_all(nanorq *rq, void *src);
 
 /*
- it restores one symbol for a given esi in decoder.
+ It restores one symbol for a given esi in decoder.
  data: output symbol bytes for the ESI (size must be T)
  esi: Encoding Symbol ID, 0 ~ K-1 for source symbols, K ~ 1<<24-1 for repair symbols
       When esi < K, source symbol is recovered.
