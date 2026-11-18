@@ -31,6 +31,7 @@ int main() {
         kvec_t(int) array;
         kv_init(array);
         kv_push(int, array, 10); // append
+        kv_a(int, array, 20) = 5; // dynamic
         kv_A(array, 20) = 4; // static
         kv_destroy(array);
         return 0;
@@ -42,8 +43,6 @@ int main() {
 
         * The initial version.
 
- Modified by Yutaka Sawada at 2026.
-I removed some non-used functions.
 */
 
 #ifndef AC_KVEC_H
@@ -57,7 +56,7 @@ I removed some non-used functions.
 
 #define kvec_t(type)                                                           \
   struct {                                                                     \
-    int n, m;                                                               \
+    size_t n, m;                                                               \
     type *a;                                                                   \
   }
 #define kv_init(v) ((v).n = (v).m = 0, (v).a = 0)
@@ -70,6 +69,14 @@ I removed some non-used functions.
 #define kv_resize(type, v, s)                                                  \
   ((v).m = (s), (v).a = (type *)realloc((v).a, sizeof(type) * (v).m))
 
+#define kv_copy(type, v1, v0)                                                  \
+  do {                                                                         \
+    if ((v1).m < (v0).n)                                                       \
+      kv_resize(type, v1, (v0).n);                                             \
+    (v1).n = (v0).n;                                                           \
+    memcpy((v1).a, (v0).a, sizeof(type) * (v0).n);                             \
+  } while (0)
+
 #define kv_push(type, v, x)                                                    \
   do {                                                                         \
     if ((v).n == (v).m) {                                                      \
@@ -77,6 +84,28 @@ I removed some non-used functions.
       (v).a = (type *)realloc((v).a, sizeof(type) * (v).m);                    \
     }                                                                          \
     (v).a[(v).n++] = (x);                                                      \
+  } while (0)
+
+#define kv_pushp(type, v)                                                      \
+  (((v).n == (v).m)                                                            \
+       ? ((v).m = ((v).m ? (v).m << 1 : 2),                                    \
+          (v).a = (type *)realloc((v).a, sizeof(type) * (v).m), 0)             \
+       : 0),                                                                   \
+      ((v).a + ((v).n++))
+
+#define kv_a(type, v, i)                                                       \
+  (((v).m <= (size_t)(i)                                                       \
+        ? ((v).m = (v).n = (i) + 1, kv_roundup32((v).m),                       \
+           (v).a = (type *)realloc((v).a, sizeof(type) * (v).m), 0)            \
+    : (v).n <= (size_t)(i) ? (v).n = (i) + 1                                   \
+                           : 0),                                               \
+   (v).a[(i)])
+
+#define kv_swap(type, v, i, j)                                                 \
+  do {                                                                         \
+    type __tmp = kv_A(v, i);                                                   \
+    kv_A(v, i) = kv_A(v, j);                                                   \
+    kv_A(v, j) = __tmp;                                                        \
   } while (0)
 
 #endif
