@@ -36,7 +36,7 @@ void pcg32_srandom(uint64_t seed, uint64_t seq)
 
 uint32_t pcg32_boundedrand(uint32_t bound)
 {
-    uint32_t threshold = (uint32_t)(-(int32_t)bound) % bound;
+    uint32_t threshold = (0 - bound) % bound;
 
     for (;;) {
         uint32_t r = pcg32_random();
@@ -171,13 +171,25 @@ int main(int argc, char* argv[]){
 	}
 
 /*
+	// (Optionally) add source data at once
+	rv = nanorq_encoder_add_symbols(rq, source_buf, 0, source_count);
+	if (rv < 0){
+		printf("Failed: nanorq_encoder_add_symbols, %d, count = %d\n", rv, source_count);
+		free(source_buf);
+		free(parity_buf);
+		nanorq_free(rq);
+		return 1;
+	}
+*/
+
+/*
 	// (Optionally) add every source data one by one
 	p = source_buf;
 	for (i = 0; i < source_count; i++){
 		esi = i;
-		rv = nanorq_encoder_add_symbol(rq, p, esi);
-		if (rv != 0){
-			printf("Failed: nanorq_encoder_add_symbol, %d, ESI = %d\n", rv, esi);
+		rv = nanorq_encoder_add_symbols(rq, p, esi, 1);
+		if (rv < 0){
+			printf("Failed: nanorq_encoder_add_symbols, %d, ESI = %d\n", rv, esi);
 			free(source_buf);
 			free(parity_buf);
 			nanorq_free(rq);
@@ -186,9 +198,48 @@ int main(int argc, char* argv[]){
 		p += each_size;
 	}
 */
+
+/*
+	// (Optionally) add overlapped source data
+	// add 66% at first
+	rv = nanorq_encoder_add_symbols(rq, source_buf, 0, (source_count * 2) / 3);
+	if (rv < 0){
+		printf("Failed: nanorq_encoder_add_symbols, %d, count = %d\n", rv, (source_count * 2) / 3);
+		free(source_buf);
+		free(parity_buf);
+		nanorq_free(rq);
+		return 1;
+	}
+	input_count = nanorq_num_loaded(rq);
+	printf("Total %d source symbols were added.\n", input_count);
+	// add 50% next (16% same data should be ignored.)
+	rv = nanorq_encoder_add_symbols(rq, source_buf + (source_count / 2) * (size_t)each_size,
+			source_count / 2, (source_count + 1) / 2);
+	if (rv < 0){	// When a data was ingored, it returns 2.
+		printf("Failed: nanorq_encoder_add_symbols, %d, count = %d\n", rv, (source_count + 1) / 2);
+		free(source_buf);
+		free(parity_buf);
+		nanorq_free(rq);
+		return 1;
+	}
+	input_count = nanorq_num_loaded(rq);
+	printf("Total %d source symbols were added.\n", input_count);
+	// add 100% at last (all data should be ingored.)
+	rv = nanorq_encoder_add_symbols(rq, source_buf, 0, source_count);
+	if (rv < 0){	// When all data was ingored, it returns 1.
+		printf("Failed: nanorq_encoder_add_symbols, %d, count = %d\n", rv, source_count);
+		free(source_buf);
+		free(parity_buf);
+		nanorq_free(rq);
+		return 1;
+	}
+	input_count = nanorq_num_loaded(rq);
+	printf("Total %d source symbols were added.\n", input_count);
+*/
+
 /*
 	// (Optionally) precalculate precode matrix inversion
-	// If this is omitted, it will be done at nanorq_generate_symbols().
+	// If this is omitted, it will be done later automatically.
 	rv = nanorq_precalculate(rq);
 	if (rv != 0){
 		printf("Failed: nanorq_precalculate, %d\n", rv);
@@ -198,9 +249,10 @@ int main(int argc, char* argv[]){
 		return 1;
 	}
 */
+
 /*
-	// (Optionally) generate intermediate data from source data at once
-	// If this is omitted, it will be done in nanorq_encode_all() or nanorq_encode().
+	// (Optionally) generate intermediate data from source data
+	// If this is omitted, it will be done in nanorq_encode().
 	rv = nanorq_generate_symbols(rq, source_buf);
 	if (rv != 0){
 		printf("Failed: nanorq_generate_symbols, %d\n", rv);
@@ -211,22 +263,12 @@ int main(int argc, char* argv[]){
 	}
 */
 
-	// create all parity data at once
-	rv = nanorq_encode_all(rq, parity_buf, parity_count, source_buf);
-	if (rv != 0){
-		printf("Failed: nanorq_encode_all, %d\n", rv);
-		free(source_buf);
-		free(parity_buf);
-		nanorq_free(rq);
-		return 1;
-	}
-
-/*
 	// create every parity data one by one
 	p = parity_buf;
 	for (i = 0; i < parity_count; i++){
 		esi = source_count + i;
 		rv = nanorq_encode(rq, p, esi, source_buf);
+		//rv = nanorq_encode(rq, p, esi, NULL);	// When all source data was added already, it can set NULL.
 		if (rv != 0){
 			printf("Failed: nanorq_encode, %d, ESI = %d\n", rv, esi);
 			free(source_buf);
@@ -236,7 +278,6 @@ int main(int argc, char* argv[]){
 		}
 		p += each_size;
 	}
-*/
 
 	finish = clock();
 	duration = (double)(finish - start) / CLOCKS_PER_SEC;
@@ -337,7 +378,7 @@ int main(int argc, char* argv[]){
 	start = clock();
 
 	// initialize nanorq decoder
-	rq = nanorq_decoder_new(source_count, each_size, source_count + parity_count - 1);
+	rq = nanorq_decoder_new(source_count, each_size);
 	if (rq == NULL){
 		printf("Failed: nanorq_decoder_new\n");
 		free(source_buf);
@@ -347,6 +388,20 @@ int main(int argc, char* argv[]){
 		return 1;
 	}
 
+/*
+	// (Optionally) change max_esi after setup decoder.
+	rv = nanorq_set_max_esi(rq, source_count + parity_count - 1);
+	if (rv != 0){
+		printf("Failed: nanorq_set_max_esi, %d\n", source_count + parity_count - 1);
+		free(source_buf);
+		free(parity_buf);
+		free(order_buf);
+		free(work_buf);
+		nanorq_free(rq);
+		return 1;
+	}
+*/
+
 	// input available source data at first
 	max = source_count - lost_count;
 	for (i = 0; i < max; i++){
@@ -354,7 +409,7 @@ int main(int argc, char* argv[]){
 		//rv = nanorq_decoder_add_symbol(rq, source_buf + (size_t)each_size * esi, esi, work_buf);
 		// Set NULL, when no need to copy source data.
 		rv = nanorq_decoder_add_symbol(rq, source_buf + (size_t)each_size * esi, esi, NULL);
-		if (rv == NANORQ_SYM_ERR){
+		if (rv < 0){
 			printf("Failed: nanorq_decoder_add_symbol, %d, ESI = %d\n", rv, esi);
 			free(source_buf);
 			free(parity_buf);
@@ -372,7 +427,7 @@ int main(int argc, char* argv[]){
 		input_count++;
 		esi = order_buf[source_count + i];	// index of available parity data
 		rv = nanorq_decoder_add_symbol(rq, parity_buf + (size_t)each_size * (esi - source_count), esi, NULL);
-		if (rv == NANORQ_SYM_ERR){
+		if (rv < 0){
 			printf("Failed: nanorq_decoder_add_symbol, %d, ESI = %d\n", rv, esi);
 			free(source_buf);
 			free(parity_buf);
@@ -381,17 +436,25 @@ int main(int argc, char* argv[]){
 			nanorq_free(rq);
 			return 1;
 		}
-		if (input_count >= lost_count){	// test possible repair
-			rv = nanorq_recover_symbols(rq);
+
+/*
+		// It may be slow to test after every addition.
+		if (input_count == lost_count){	// test possible repair
+			rv = nanorq_regenerate_symbols(rq);
 			if (rv == 0){	// got enough data to recover
 				break;
-			} else if (rv == NANORQ_ENC_ERR){
-				printf("Failed: nanorq_recover_symbols, %d\n", rv);
+			} else if (rv == NANORQ_SYM_LACK){
+				printf("Failed: need more symbols to recover, added %d / %d parity\n", input_count, parity_count);
+			} else if (rv < 0){
+				printf("Failed: nanorq_regenerate_symbols, %d\n", rv);
+				break;
 			}
 		}
+*/
 	}
 	printf("input %d available parity data\n", input_count);
 
+/*
 	// fail at: s400 p123, s500 p145, s600 p255
 	if (rv != 0){
 		printf("Failed: need more parity to recover, %d\n", input_count);
@@ -402,11 +465,12 @@ int main(int argc, char* argv[]){
 		nanorq_free(rq);
 		return 1;
 	}
+*/
 
 	// recover all lost source data at once
-	rv = nanorq_repair_all(rq, work_buf);
+	rv = nanorq_repair(rq, work_buf);
 	if (rv != 0){
-		printf("Failed: nanorq_repair_all, %d\n", rv);
+		printf("Failed: nanorq_repair, %d\n", rv);
 		free(source_buf);
 		free(parity_buf);
 		free(order_buf);
@@ -414,13 +478,14 @@ int main(int argc, char* argv[]){
 		nanorq_free(rq);
 		return 1;
 	}
+
 /*
-	// restore every source data one by one
+	// (Optionally) restore every source data one by one
 	p = work_buf;
 	for (i = 0; i < source_count; i++){
-		rv = nanorq_restore(rq, p, i);
+		rv = nanorq_restore_symbol(rq, p, i);
 		if (rv != 0){
-			printf("Failed: nanorq_restore, %d, ESI = %d\n", rv, i);
+			printf("Failed: nanorq_restore_symbol, %d, ESI = %d\n", rv, i);
 			free(source_buf);
 			free(parity_buf);
 			free(order_buf);
@@ -431,13 +496,14 @@ int main(int argc, char* argv[]){
 		p += each_size;
 	}
 */
+
 /*
-	// recover every lost source data one by one
+	// (Optionally) recover every lost source data one by one
 	for (i = 0; i < lost_count; i++){
 		esi = order_buf[i + source_count - lost_count];	// index of lost source data
-		rv = nanorq_restore(rq, work_buf + (size_t)each_size * esi, esi);
+		rv = nanorq_restore_symbol(rq, work_buf + (size_t)each_size * esi, esi);
 		if (rv != 0){
-			printf("Failed: nanorq_restore, %d, ESI = %d\n", rv, esi);
+			printf("Failed: nanorq_restore_symbol, %d, ESI = %d\n", rv, esi);
 			free(source_buf);
 			free(parity_buf);
 			free(order_buf);

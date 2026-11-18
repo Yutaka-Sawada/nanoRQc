@@ -9,13 +9,13 @@ Thanks Joseph Calderon for releasing the original nanorq library.
 
 # Usable on Microsoft Visual Studio
 
-This is a modified version of [nanorq](https://github.com/sleepybishop/nanorq). 
+This is a modified version of [nanorq](https://github.com/ursoid-tech/nanorq). 
 Because the original nanorq cannot be compiled on Microsoft Visual Studio, 
 I changed some points for compatibility with Microsoft Visual C.
 
-I removed mmap feature, as C-runtime library doesn't support it on Windows OS.
-
-I added detecting CPU feature (SSSE3 or AVX2) to switch functions automatically.
+To enable atomic functions, you must use Microsoft Visual Studio 2022 (version 17.5 or later).  
+It requires compiler option "`/std:c11`" or "`/std:c17`".  
+It requires "`/experimental:c11atomics`" as additional compiler option, too.
 
 # Convenient API for utility
 
@@ -23,22 +23,20 @@ I removed block selection. Source Block Number is 0 always.
 To support large data in single block, symbol size can be larger than 65536 bytes. 
 Only two parameters (K and T) are used to setup encoder.
 
-I removed support of file stream. 
-Because it only supports data on memory, decoding may become faster.
+I removed support of file stream and memory mapped file. 
 
 I added more return values to determine failure. 
 It may be helpful to control the behavior after error.
 
 I added some useful functions. 
-It's possible to add each source symbol in encoder one by one, or add all source symbols at once. 
-It's possible to create each repair symbol one by one, or create all repair symbols at once. 
-It's possible to restore each symbol in decoder one by one, or recover all missing source symbols at once. 
+It's possible to add each source symbol in encoder one by one. 
+It's possible to restore each symbol in decoder one by one. 
 You may try the possibility of successful repair, while adding symbols into decoder.
 
 # Notes
 
 As I changed some, gcc may not compile this modified version. 
-If you use nanorq with gcc on Linux or Unix, you would better use [original version](https://github.com/sleepybishop/nanorq).
+If you use nanorq with gcc on Linux or Unix, you would better use [original version](https://github.com/ursoid-tech/nanorq).
 
 If you want full support of RFC 6330 on Microsoft Visual Studio, 
 you may use [nanorq for Visual C](https://github.com/Yutaka-Sawada/nanorq_vc).

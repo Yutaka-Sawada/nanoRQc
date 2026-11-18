@@ -1,11 +1,11 @@
 
 nanorq
 RaptorQ RFC 6330 library for gcc
-https://github.com/sleepybishop/nanorq
+https://github.com/ursoid-tech/nanorq
 
 MIT License
 
-Copyright (c) 2020 Joseph Calderon
+Copyright (c) 2026 Joseph Calderon
 
 --------------------------------------------------------------------------------
 
