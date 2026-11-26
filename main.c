@@ -440,6 +440,7 @@ int main(int argc, char* argv[]){
 /*
 		// It may be slow to test after every addition.
 		if (input_count == lost_count){	// test possible repair
+			// fail at: s400 p123, s500 p145, s600 p255
 			rv = nanorq_regenerate_symbols(rq);
 			if (rv == 0){	// got enough data to recover
 				break;
@@ -453,19 +454,6 @@ int main(int argc, char* argv[]){
 */
 	}
 	printf("input %d available parity data\n", input_count);
-
-/*
-	// fail at: s400 p123, s500 p145, s600 p255
-	if (rv != 0){
-		printf("Failed: need more parity to recover, %d\n", input_count);
-		free(source_buf);
-		free(parity_buf);
-		free(order_buf);
-		free(work_buf);
-		nanorq_free(rq);
-		return 1;
-	}
-*/
 
 	// recover all lost source data at once
 	rv = nanorq_repair(rq, work_buf);
