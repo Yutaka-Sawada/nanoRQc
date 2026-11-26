@@ -33,18 +33,19 @@ static void precode_matrix_make_LDPC2(u32_vec *A, u32 W, u32 S, u32 P) {
 void precode_matrix_make_HDPC(params *P, pc *W) {
   u32 m = P->H, n = P->Kprime + P->S, col = n - 1;
 
-  assert(m > 0 && n > 0);
+  if (m == 0)
+    return;
+  assert(n > 0);
 
   for (u32 row = 0; row < m; row++)
     uv_E(W->HDPC, row, col) = OCT_EXP[row];
 
   while (col > 0) {
     col--;
-    for (u32 row = 0; row < m; row++)
-      uv_E(W->HDPC, row, col) =
-          (uv_E(W->HDPC, row, col + 1) == 0)
-              ? 0
-              : OCT_EXP[OCT_LOG[uv_E(W->HDPC, row, col + 1)] + 1];
+    for (u32 row = 0; row < m; row++) {
+      u8 v = uv_E(W->HDPC, row, col + 1);
+      uv_E(W->HDPC, row, col) = (u8)((v << 1) ^ ((v & 0x80U) ? 0x1dU : 0U));
+    }
     u32 b1 = rnd_get(col + 1, 6, m);
     u32 b2 = (b1 + rnd_get(col + 1, 7, m - 1) + 1) % m;
     uv_E(W->HDPC, b1, col) ^= 1;
@@ -261,13 +262,25 @@ static void precode_matrix_fill_HDPC(params *P, pc *W) {
   }
   W->F.used = P->H;
   W->F.max = 2 * P->H;
+
+  void (*axpyb32)(u8 *, u32 *, u8, unsigned) = nanorq_oblas.axpyb32;
+  void (*on_op)(void *, u32, u32, u8) = W->cb.on_op;
+  void *op_arg = W->cb.on_op_arg;
+  bool emit_ops = (on_op != precode_matrix_on_op);
+  u32 u_s = W->U.s;
+  u32 ul_s = W->UL.s;
+
   for (u32 row = 0; row < W->i; row++) {
     u32 crow = uv_A(W->c, row), drow = uv_A(W->d, row);
+    u32 *ubits = W->U.a + (size_t)drow * u_s;
     for (u32 h = 0, del_row = W->rows - P->H; h < P->H; h++, del_row++) {
       u8 beta = uv_E(W->HDPC, h, crow);
       if (beta) {
-        hf_axpy(W, uv_A(W->d, del_row), drow, beta);
-        W->cb.on_op(W->cb.on_op_arg, uv_A(W->d, del_row), drow, beta);
+        u32 tdrow = uv_A(W->d, del_row);
+        u8 *ul_dst = W->UL.a + (size_t)uv_A(W->F.rowmap, tdrow) * ul_s;
+        axpyb32(ul_dst, ubits, beta, ul_s);
+        if (emit_ops)
+          on_op(op_arg, tdrow, drow, beta);
       }
     }
   }
@@ -376,6 +389,8 @@ int precode_matrix_invert(params *P, pc *W) {
     rank = precode_matrix_solve_gf2(P, W);
 
   if (rank < P->L) {
+    if (P->H == 0)
+      return 0;
     precode_matrix_fill_HDPC(P, W);
     rank = precode_matrix_solve_gf256(P, W);
     if (rank < P->L)

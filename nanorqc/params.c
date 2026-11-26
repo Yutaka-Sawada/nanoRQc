@@ -16,29 +16,26 @@ static int is_prime(u32 n) {
 }
 
 params params_init(u32 K) {
-  params P;
+  u32 idx = 0;
+  while (idx < K_padded_size && K > K_padded[idx])
+    idx++;
+  if (K == 0 || idx == K_padded_size)
+    return (params){0};
 
-  for (u32 i = 0; i < K_padded_size; i++) {
-    if (K <= K_padded[i]) {
-      P.Kprime = K_padded[i];
-      P.J = J_K_padded[i];
-      P.S = S_H_W[i][0];
-      P.H = S_H_W[i][1];
-      P.W = S_H_W[i][2];
-      break;
-    }
-  }
-
+  params P = {0};
   P.K = K;
+  P.Kprime = K_padded[idx];
+  P.J = J_K_padded[idx];
+  P.S = S_H_W[idx][0];
+  P.H = S_H_W[idx][1];
+  P.W = S_H_W[idx][2];
   P.L = P.Kprime + P.S + P.H;
   P.P = P.L - P.W;
   P.U = P.P - P.H;
   P.B = P.W - P.S;
   P.P1 = P.P;
-
   while (!is_prime(P.P1))
     P.P1++;
-
   return P;
 }
 

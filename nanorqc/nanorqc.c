@@ -31,8 +31,9 @@ struct block_encoder {
   uint16_t K; /* the number of source symbols */
   int loaded;
   bool inverted;
+  nanorq_core *inversion_core; /* owns the permutation used for D */
 
-  // Core low level solver:
+  /* core low level solver */
   nanorq_core core;
 
   // Dynamic scratch memory for core solver:
@@ -46,10 +47,19 @@ struct block_encoder {
   uint32_t stride;    /* recommended row stride */
   uint8_t *mix_buf;
 
-  schedule S; // Operations schedule
+  schedule S; /* operations schedule */
+  size_t sched_cap;
 
   repair_vec repair_bin;
   compat_bitmask repair_mask;
+};
+
+struct precalc_entry {
+  uint16_t K;
+  nanorq_core *core;
+  uint8_t *prep_mem;
+  uint8_t *work_mem;
+  schedule *S;
 };
 
 struct nanorq {
@@ -59,11 +69,8 @@ struct nanorq {
 
   struct block_encoder encoder[1]; // This supports single block only.
 
-  // Cached precalculated components
-  nanorq_core *precalc_core;
-  uint8_t *precalc_prep_mem;
-  uint8_t *precalc_work_mem;
-  schedule *precalc_S;
+  /* cached precalculated components for (KL, KS) */
+  struct precalc_entry precalc[2];
 };
 
 static bool repair_vec_push(repair_vec *v, repair_sym val) {
@@ -176,8 +183,8 @@ static bool set_block_encoder(nanorq *rq, uint16_t K) {
     return false;
   }
   /* pack matrix to SIMD alignment */
-  uint32_t align = get_align_size();
-  enc->stride = ((rq->T + align - 1) / align) * align;
+  size_t align = get_align_size();
+  enc->stride = (uint32_t)(((rq->T + align - 1) / align) * align);
   if (enc->stride == 0) {
     compat_bitmask_free(&enc->repair_mask);
     return false;
@@ -212,23 +219,36 @@ nanorq *nanorq_encoder_new(uint16_t K, uint32_t T) {
   return rq;
 }
 
+static void free_precalc_entry(struct precalc_entry *e) {
+  if (!e || !e->core)
+    return;
+  free(e->prep_mem);
+  free(e->work_mem);
+  if (e->S) {
+    free(e->S->ops.a);
+    free(e->S);
+  }
+  free(e->core);
+  *e = (struct precalc_entry){0};
+}
+
+static struct precalc_entry *find_precalc_entry(nanorq *rq, uint16_t K) {
+  if (!rq || K == 0)
+    return NULL;
+  for (size_t i = 0; i < 2; i++) {
+    if (rq->precalc[i].core && rq->precalc[i].K == K)
+      return &rq->precalc[i];
+  }
+  return NULL;
+}
+
 void nanorq_free(nanorq *rq) {
   if (!rq)
     return;
   nanorq_encoder_cleanup(rq);
 
-  if (rq->precalc_core) {
-    if (rq->precalc_prep_mem)
-      free(rq->precalc_prep_mem);
-    if (rq->precalc_work_mem)
-      free(rq->precalc_work_mem);
-    if (rq->precalc_S) {
-      if (rq->precalc_S->ops.a)
-        free(rq->precalc_S->ops.a);
-      free(rq->precalc_S);
-    }
-    free(rq->precalc_core);
-  }
+  free_precalc_entry(&rq->precalc[0]);
+  free_precalc_entry(&rq->precalc[1]);
 
   free(rq);
 }
@@ -259,13 +279,10 @@ nanorq *nanorq_decoder_new(uint16_t K, uint32_t T) {
   return rq;
 }
 
-int nanorq_precalculate(nanorq *rq) {
-  if (!rq)
-    return NANORQ_SYM_PARA;
-  if (rq->precalc_core)
-    return NANORQ_SYM_OK; // Already precalculated
-
-  uint16_t K = rq->encoder->K;
+static bool build_precalc_entry(nanorq *rq, uint16_t K,
+                                struct precalc_entry *out) {
+  if (!rq || !out || K == 0)
+    return false;
   nanorq_core *core = (nanorq_core *)calloc(1, sizeof(nanorq_core));
   uint8_t *prep_mem = NULL;
   uint8_t *work_mem = NULL;
@@ -288,15 +305,16 @@ int nanorq_precalculate(nanorq *rq) {
     goto fail;
 
   nanorq_core_set_op_callback(core, S, ops_push);
-  if ((nanorq_core_precalculate(core, work_mem, work_len) <= 0) ||
-      S->overflowed || S->cpidx != 2)
+  if (!nanorq_core_precalculate(core, work_mem, work_len) || S->overflowed ||
+      S->cpidx != 2)
     goto fail;
 
-  rq->precalc_core = core;
-  rq->precalc_prep_mem = prep_mem;
-  rq->precalc_work_mem = work_mem;
-  rq->precalc_S = S;
-  return NANORQ_SYM_OK;
+  out->K = K;
+  out->core = core;
+  out->prep_mem = prep_mem;
+  out->work_mem = work_mem;
+  out->S = S;
+  return true;
 
 fail:
   free(sched_mem);
@@ -304,7 +322,20 @@ fail:
   free(work_mem);
   free(prep_mem);
   free(core);
-  return NANORQ_SYM_ERR;
+  return false;
+}
+
+int nanorq_precalculate(nanorq *rq) {
+  if (!rq)
+    return NANORQ_SYM_PARA;
+  if (rq->precalc[0].core)
+    return NANORQ_SYM_OK; // Already precalculated
+
+  uint16_t k0 = rq->encoder->K;;
+  if (!build_precalc_entry(rq, k0, &rq->precalc[0]))
+    return NANORQ_SYM_ERR;
+
+  return NANORQ_SYM_OK;
 }
 
 /* retain scratch storage across block resets */
@@ -321,16 +352,18 @@ static bool reserve_scratch(uint8_t **mem, size_t *capacity, size_t bytes) {
   return true;
 }
 
-static bool reset_schedule(schedule *S, uint16_t K) {
-  size_t bytes = ops_estimate_schedule_bytes(K);
+static bool reset_schedule(schedule *S, size_t *sched_cap, uint32_t k_plus_oh) {
+  size_t bytes = ops_estimate_schedule_bytes(k_plus_oh);
   if (bytes == 0)
     return false;
-  if (!S->ops.a) {
-    S->ops.a = (sched_op *)malloc(bytes);
-    if (!S->ops.a)
+  if (!S->ops.a || *sched_cap < bytes) {
+    sched_op *next = (sched_op *)realloc(S->ops.a, bytes);
+    if (!next)
       return false;
+    S->ops.a = next;
+    *sched_cap = bytes;
   }
-  return schedule_init(S, S->ops.a, bytes);
+  return schedule_init(S, S->ops.a, *sched_cap);
 }
 
 static bool ensure_block_matrix(struct block_encoder *enc) {
@@ -411,8 +444,11 @@ int nanorq_generate_symbols(nanorq *rq, void *src) {
     enc->loaded = enc->K;	// All source symbols were added.
   }
 
-  if (rq->precalc_core) {
-    ops_run(rq->precalc_core, enc->D, enc->stride, rq->precalc_S);
+  struct precalc_entry *pc_ent = find_precalc_entry(rq, enc->K);
+  if (pc_ent) {
+    if (!ops_run_pivoted(enc->D, enc->stride, pc_ent->S))
+      return NANORQ_SYM_ERR;
+    enc->inversion_core = pc_ent->core;
     enc->inverted = true;
     return NANORQ_SYM_OK;
   }
@@ -426,15 +462,15 @@ int nanorq_generate_symbols(nanorq *rq, void *src) {
 
   size_t work_len = nanorq_core_calculate_prepared_work_memory(&enc->core);
   if (!reserve_scratch(&enc->work_mem, &enc->work_len, work_len) ||
-      !reset_schedule(&enc->S, enc->K))
+      !reset_schedule(&enc->S, &enc->sched_cap, enc->K))
     return NANORQ_SYM_ERR;
 
   nanorq_core_set_op_callback(&enc->core, &enc->S, ops_push);
   if ((nanorq_core_precalculate(&enc->core, enc->work_mem, enc->work_len) <= 0) ||
-      enc->S.overflowed || enc->S.cpidx != 2)
+      !ops_run_pivoted(enc->D, enc->stride, &enc->S))
     return NANORQ_SYM_ERR;
 
-  ops_run(&enc->core, enc->D, enc->stride, &enc->S);
+  enc->inversion_core = &enc->core;
   enc->inverted = true;
 
   return NANORQ_SYM_OK;
@@ -469,7 +505,7 @@ int nanorq_encode(nanorq *rq, void *data, uint32_t esi, void *src) {
   }
   if (!ensure_mix_buf(enc))
     return NANORQ_SYM_ERR;
-  ops_mix(&enc->core, enc->D, enc->stride, esi, enc->mix_buf);
+  ops_mix_pivoted(enc->inversion_core, enc->D, enc->stride, esi, enc->mix_buf);
   memcpy(data, enc->mix_buf, rq->T);
   return NANORQ_SYM_OK;
 }
@@ -501,6 +537,7 @@ void nanorq_encoder_reset(nanorq *rq) {
   struct block_encoder *enc = rq->encoder;
   enc->loaded = 0;
   enc->inverted = false;
+  enc->inversion_core = NULL;
   if (enc->core.overhead != 0) {
     nanorq_core base_core = {0};
     if (nanorq_core_encoder_new(enc->K, 0, &base_core))
@@ -595,7 +632,7 @@ static void write_recovered_block(nanorq *rq, struct block_encoder *dec,
   for (uint32_t gap = 0; gap < dec->K; gap++) {
     if (compat_bitmask_check(&dec->repair_mask, gap))
       continue;
-    ops_mix(&dec->core, dec->D, dec->stride, gap, dec->mix_buf);
+    ops_mix_pivoted(dec->inversion_core, dec->D, dec->stride, gap, dec->mix_buf);
     transfer_esi(gap, dec->mix_buf, rq->T, src, 1);
   }
 
@@ -605,36 +642,16 @@ static void write_recovered_block(nanorq *rq, struct block_encoder *dec,
   }
 }
 
-/*
- src: output bytes of all source symbols (total size must be K * T)
-      Missing source symbols will be restored in their positions.
-*/
-int nanorq_repair(nanorq *rq, void *src) {
-  if (!rq || !src)
-    return NANORQ_SYM_PARA;
-  struct block_encoder *dec = rq->encoder;
-
-  size_t conventional_count = dec->repair_bin.n;
-
-  size_t num_gaps = compat_bitmask_gaps(&dec->repair_mask, dec->K);
-  if (num_gaps == 0)
-    return NANORQ_SYM_IGN;	// Because all source symbols exist, repair isn't needed.
-  if (dec->inverted) {	// When intermediate symbols were restored, it recovers all source symbols.
-    if (!ensure_mix_buf(dec))
-      return NANORQ_SYM_ERR;
-    write_recovered_block(rq, dec, src);
-    return NANORQ_SYM_OK;
-  }
-  if (conventional_count < num_gaps || conventional_count - num_gaps > UINT32_MAX)
-    return NANORQ_SYM_LACK;	// added symbols aren't enough for recovery.
-
-  uint32_t overhead = (uint32_t)(conventional_count - num_gaps);
+static bool attempt_conventional_repair(nanorq *rq, struct block_encoder *dec,
+                                        void *src,
+                                        uint32_t overhead,
+                                        bool *rank_failed) {
   nanorq_core core = {0};
   bool matrix_modified = false;
-  int success = NANORQ_SYM_ERR;
+  bool success = false;
+  *rank_failed = false;
 
-  if (!ensure_block_matrix(dec) ||
-      !nanorq_core_encoder_new(dec->K, overhead, &core))
+  if (!nanorq_core_encoder_new(dec->K, overhead, &core))
     goto out;
 
   size_t rows = nanorq_core_get_pc_rows(&core);
@@ -680,7 +697,8 @@ int nanorq_repair(nanorq *rq, void *src) {
     repair_sym *rs = &dec->repair_bin.a[rep_idx++];
     uint32_t row = core.P.Kprime + extra;
     nanorq_core_replace_symbol(&core, row, rs->esi);
-    nanorq_core_place_symbol(&core, dec->D, dec->stride, row, rs->row, rq->T);
+    nanorq_core_place_symbol(&core, dec->D, dec->stride, row, rs->row,
+                             rq->T);
   }
 
   if (!nanorq_core_patch_matrix(&core))
@@ -688,33 +706,99 @@ int nanorq_repair(nanorq *rq, void *src) {
   size_t work_len = nanorq_core_calculate_prepared_work_memory(&core);
   if (!ensure_mix_buf(dec) ||
       !reserve_scratch(&dec->work_mem, &dec->work_len, work_len) ||
-      !reset_schedule(&dec->S, dec->K))
+      !reset_schedule(&dec->S, &dec->sched_cap, (uint32_t)dec->K + overhead))
     goto out;
-  nanorq_core_set_op_callback(&core, &dec->S, ops_push);
-  int invert = nanorq_core_precalculate(&core, dec->work_mem, dec->work_len);
-  if ((invert <= 0) || dec->S.overflowed || dec->S.cpidx != 2){
-    if (invert == 0)
-      success = NANORQ_SYM_LACK;	// Failed to invert matrix. It may need more symbols.
-    goto out;
+
+  for (;;) {
+    nanorq_core_set_op_callback(&core, &dec->S, ops_push);
+    if (!nanorq_core_precalculate(&core, dec->work_mem, dec->work_len)) {
+      *rank_failed = true;
+      goto out;
+    }
+    if (dec->S.cpidx != 2)
+      goto out;
+    if (!dec->S.overflowed)
+      break;
+    if (dec->S.ops.n < dec->S.ops.m || dec->sched_cap > SIZE_MAX / 2)
+      goto out;
+    size_t grown = dec->sched_cap * 2;
+    sched_op *next = (sched_op *)realloc(dec->S.ops.a, grown);
+    if (!next)
+      goto out;
+    dec->S.ops.a = next;
+    dec->sched_cap = grown;
+    if (!schedule_init(&dec->S, dec->S.ops.a, dec->sched_cap) ||
+        !nanorq_core_patch_matrix(&core))
+      goto out;
   }
 
+  if (!ops_run_pivoted(dec->D, dec->stride, &dec->S))
+    goto out;
+
   dec->core = core;
-  ops_run(&dec->core, dec->D, dec->stride, &dec->S);
+  dec->inversion_core = &dec->core;
   dec->inverted = true;
-  write_recovered_block(rq, dec, src);
-  success = NANORQ_SYM_OK;
+  if (src)
+    write_recovered_block(rq, dec, src);
+  success = true;
 
 out:
   if (matrix_modified && !dec->inverted) {
     for (uint32_t gap = 0; gap < dec->K; gap++) {
       if (!compat_bitmask_check(&dec->repair_mask, gap))
-        memset(nanorq_core_get_symbol_ptr(&core, dec->D, dec->stride, gap), 0, dec->stride);
+        memset(nanorq_core_get_symbol_ptr(&core, dec->D, dec->stride, gap), 0,
+               dec->stride);
     }
     for (uint32_t extra = 0; extra < overhead; extra++)
-      memset(nanorq_core_get_symbol_ptr(&core, dec->D, dec->stride, core.P.Kprime + extra),
+      memset(nanorq_core_get_symbol_ptr(&core, dec->D, dec->stride,
+                                        core.P.Kprime + extra),
              0, dec->stride);
   }
   return success;
+}
+
+/*
+ src: output bytes of all source symbols (total size must be K * T)
+      Missing source symbols will be restored in their positions.
+*/
+int nanorq_repair(nanorq *rq, void *src) {
+  if (!rq || !src)
+    return NANORQ_SYM_PARA;
+  struct block_encoder *dec = rq->encoder;
+
+  size_t conventional_count = dec->repair_bin.n;
+
+  size_t num_gaps = compat_bitmask_gaps(&dec->repair_mask, dec->K);
+  if (num_gaps == 0)
+    return NANORQ_SYM_IGN;	// Because all source symbols exist, repair isn't needed.
+  if (dec->inverted) {	// When intermediate symbols were restored, it recovers all source symbols.
+    if (!ensure_mix_buf(dec))
+      return NANORQ_SYM_ERR;
+    write_recovered_block(rq, dec, src);
+    return NANORQ_SYM_OK;
+  }
+  if (conventional_count < num_gaps ||
+      conventional_count - num_gaps > UINT32_MAX)
+    return NANORQ_SYM_LACK;	// added symbols aren't enough for recovery.
+  if (!ensure_block_matrix(dec))
+    return NANORQ_SYM_ERR;
+
+  uint32_t avail_oh = (uint32_t)(conventional_count - num_gaps);
+  /* Cap the first attempt at H + 8 extra equations. This permits the GF(2)
+   * fast path without sizing the matrix for an entire buffered burst. */
+  uint32_t cap_oh = dec->core.P.H + 8U;
+  uint32_t first_oh = avail_oh > cap_oh ? cap_oh : avail_oh;
+  bool rank_failed = false;
+
+  if (attempt_conventional_repair(rq, dec, src, first_oh, &rank_failed))
+    return NANORQ_SYM_OK;
+  if (rank_failed && first_oh < avail_oh){
+    if (attempt_conventional_repair(rq, dec, src, avail_oh, &rank_failed))
+      return NANORQ_SYM_OK;
+  }
+  if (rank_failed)
+    return NANORQ_SYM_LACK;	// Failed to invert matrix. It may need more symbols.
+  return NANORQ_SYM_ERR;
 }
 
 // similar to nanorq_generate_symbols(), but this is used at decoding.
@@ -731,92 +815,21 @@ int nanorq_regenerate_symbols(nanorq *rq) {
   if (dec->inverted)
     return NANORQ_SYM_OK;	// intermediate symbols were generated already.
 
-  if (conventional_count < num_gaps || conventional_count - num_gaps > UINT32_MAX)
+  if (conventional_count < num_gaps ||
+      conventional_count - num_gaps > UINT32_MAX)
     return NANORQ_SYM_LACK;	// added symbols aren't enough for recovery.
+  if (!ensure_block_matrix(dec))
+    return NANORQ_SYM_ERR;
 
   uint32_t overhead = (uint32_t)(conventional_count - num_gaps);
-  nanorq_core core = {0};
-  bool matrix_modified = false;
-  int success = NANORQ_SYM_ERR;
+  bool rank_failed = false;
 
-  if (!ensure_block_matrix(dec) ||
-      !nanorq_core_encoder_new(dec->K, overhead, &core))
-    goto out;
-
-  size_t rows = nanorq_core_get_pc_rows(&core);
-  size_t base_rows = nanorq_core_get_pc_rows(&dec->core);
-  if (base_rows > rows)
-    goto out;
-  if (rows > dec->matrix_rows) {
-    uint8_t *D = (uint8_t *)obl_alloc(rows, dec->stride, nanorq_oblas.align_size);
-    if (!D)
-      goto out;
-    memcpy(D, dec->D, base_rows * dec->stride);
-    obl_free(dec->D);
-    dec->D = D;
-    dec->matrix_rows = rows;
-  } else {
-    /* reset clears base matrix; clear only active overhead */
-    memset(dec->D + base_rows * dec->stride, 0,
-           (rows - base_rows) * dec->stride);
-  }
-
-  size_t prep_len = nanorq_core_calculate_prepare_memory(&core);
-  if (!reserve_scratch(&dec->prep_mem, &dec->prep_len, prep_len) ||
-      !nanorq_core_generate(&core, dec->prep_mem, dec->prep_len))
-    goto out;
-
-  size_t rep_idx = 0;
-  matrix_modified = true;
-  for (uint32_t gap = 0; gap < dec->K; gap++) {
-    if (compat_bitmask_check(&dec->repair_mask, gap))
-      continue;
-    if (rep_idx == dec->repair_bin.n)
-      goto out;
-    repair_sym *rs = &dec->repair_bin.a[rep_idx++];
-    nanorq_core_replace_symbol(&core, gap, rs->esi);
-    nanorq_core_place_symbol(&core, dec->D, dec->stride, gap, rs->row, rq->T);
-  }
-
-  for (uint32_t extra = 0; extra < overhead; extra++) {
-    if (rep_idx == dec->repair_bin.n)
-      goto out;
-    repair_sym *rs = &dec->repair_bin.a[rep_idx++];
-    uint32_t row = core.P.Kprime + extra;
-    nanorq_core_replace_symbol(&core, row, rs->esi);
-    nanorq_core_place_symbol(&core, dec->D, dec->stride, row, rs->row, rq->T);
-  }
-
-  if (!nanorq_core_patch_matrix(&core))
-    goto out;
-  size_t work_len = nanorq_core_calculate_prepared_work_memory(&core);
-  if (!reserve_scratch(&dec->work_mem, &dec->work_len, work_len) ||
-      !reset_schedule(&dec->S, dec->K))
-    goto out;
-  nanorq_core_set_op_callback(&core, &dec->S, ops_push);
-  int invert = nanorq_core_precalculate(&core, dec->work_mem, dec->work_len);
-  if ((invert <= 0) || dec->S.overflowed || dec->S.cpidx != 2){
-    if (invert == 0)
-      success = NANORQ_SYM_LACK;	// Failed to invert matrix. It may need more symbols.
-    goto out;
-  }
-
-  dec->core = core;
-  ops_run(&dec->core, dec->D, dec->stride, &dec->S);
-  dec->inverted = true;
-  success = NANORQ_SYM_OK;
-
-out:
-  if (matrix_modified && !dec->inverted) {
-    for (uint32_t gap = 0; gap < dec->K; gap++) {
-      if (!compat_bitmask_check(&dec->repair_mask, gap))
-        memset(nanorq_core_get_symbol_ptr(&core, dec->D, dec->stride, gap), 0, dec->stride);
-    }
-    for (uint32_t extra = 0; extra < overhead; extra++)
-      memset(nanorq_core_get_symbol_ptr(&core, dec->D, dec->stride, core.P.Kprime + extra),
-             0, dec->stride);
-  }
-  return success;
+  // By setting NULL for src, call attempt_conventional_repair() without recovery.
+  if (attempt_conventional_repair(rq, dec, NULL, overhead, &rank_failed))
+    return NANORQ_SYM_OK;
+  if (rank_failed)
+    return NANORQ_SYM_LACK;	// Failed to invert matrix. It may need more symbols.
+  return NANORQ_SYM_ERR;
 }
 
 // similar to nanorq_encode(), but this is used at decoding.
@@ -835,7 +848,7 @@ int nanorq_restore_symbol(nanorq *rq, void *data, uint32_t esi) {
 
   if (!ensure_mix_buf(dec))
     return NANORQ_SYM_ERR;
-  ops_mix(&dec->core, dec->D, dec->stride, esi, dec->mix_buf);
+  ops_mix_pivoted(dec->inversion_core, dec->D, dec->stride, esi, dec->mix_buf);
   memcpy(data, dec->mix_buf, rq->T);
 
   return NANORQ_SYM_OK;

@@ -43,14 +43,14 @@ size_t nanorq_core_calculate_work_memory(nanorq_core *rq);
 /* exact workspace bound after prepare or patch */
 size_t nanorq_core_calculate_prepared_work_memory(nanorq_core *rq);
 
-/* precalculate rq matrix inversion */
-int nanorq_core_precalculate(nanorq_core *rq, uint8_t *work_mem,
+/* precalculate rq matrix inversion; work_mem may be freed after this call */
+bool nanorq_core_precalculate(nanorq_core *rq, uint8_t *work_mem,
                               size_t wm_len);
 
 /* recommended row stride for t, accounting for simd and cache-line aliasing. */
 uint32_t nanorq_core_recommended_stride(uint32_t T);
 
-/* memory requirements for k, overhead, and stride. */
+/* memory requirements for the default RFC 6330 profile. */
 struct nanorq_core_mem_reqs {
   size_t prepare_bytes;
   size_t work_bytes;
@@ -116,7 +116,7 @@ static inline uint8_t *nanorq_core_get_symbol_ptr(nanorq_core *rq, uint8_t *D,
                                                   uint32_t stride,
                                                   uint32_t row) {
   uint32_t SH = nanorq_core_get_pc_genc_offset(rq);
-  return D + (SH + row) * stride;
+  return D + ((size_t)SH + row) * stride;
 }
 
 #endif

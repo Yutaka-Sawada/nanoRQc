@@ -14,7 +14,7 @@ extern struct oblas_impl nanorq_oblas;
 
 #define OBLAS_DEFAULT_ALIGN 32
 
-static inline uint32_t get_align_size(void) {
+static inline size_t get_align_size(void) {
   return nanorq_oblas.align_size > 0 ? nanorq_oblas.align_size
                                      : OBLAS_DEFAULT_ALIGN;
 }
