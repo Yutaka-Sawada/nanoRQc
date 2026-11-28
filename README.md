@@ -25,6 +25,8 @@ Only two parameters (K and T) are used to setup encoder.
 
 I removed support of file stream and memory mapped file. 
 
+I removed some experimental functions in nanorq, such like Tunable Sparse Network Coding or XOR-only profile. 
+
 I added more return values to determine failure. 
 It may be helpful to control the behavior after error.
 
