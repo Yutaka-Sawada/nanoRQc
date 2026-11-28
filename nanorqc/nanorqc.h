@@ -132,23 +132,16 @@ int nanorq_num_repair(nanorq *rq);
  It repairs all missing source symbols in decoder at once.
  src: output bytes of all source symbols (total size must be K * T)
       Missing source symbols will be restored in their positions.
+      When src is NULL, it just regenerates intermediate symbols.
       While this is useful, src buffer size may be large.
-      If missing symbols are fewer than K, nanorq_restore() would consume less memory.
+      If missing symbols are few, nanorq_restore_symbol() would consume less memory.
 It returns 0 at success, see NANORQ_SYM_*.
 After it repaired all missing symbols, nanorq_num_missing() will return 0.
 Because all source symbols are repaired, calling this twice is useless.
+If you want to know number of added symbols are enough or not before actual repair,
+set NULL for src to determine possible repair.
 */
 int nanorq_repair(nanorq *rq, void *src);
-
-/*
- It regenerates intermediate symbols from added symbols in decoder.
-It returns 0 at success, see NANORQ_SYM_*.
-This is an optional function.
-It determines possible repair before calling nanorq_repair() or nanorq_restore_symbol().
-If you want to know number of added symbols are enough or not before actual repair,
-this function will be useful.
-*/
-int nanorq_regenerate_symbols(nanorq *rq);
 
 /*
  It restores a symbol for a given esi in decoder.

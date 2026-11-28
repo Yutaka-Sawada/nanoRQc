@@ -500,7 +500,7 @@ int nanorq_encode(nanorq *rq, void *data, uint32_t esi, void *src) {
     return NANORQ_SYM_PARA;
   if (!enc->inverted) {
     int success = nanorq_generate_symbols(rq, src);
-    if (success != 0)
+    if (success != NANORQ_SYM_OK)
       return success;
   }
   if (!ensure_mix_buf(enc))
@@ -760,9 +760,10 @@ out:
 /*
  src: output bytes of all source symbols (total size must be K * T)
       Missing source symbols will be restored in their positions.
+      When src is NULL, it just regenerates intermediate symbols.
 */
 int nanorq_repair(nanorq *rq, void *src) {
-  if (!rq || !src)
+  if (!rq)
     return NANORQ_SYM_PARA;
   struct block_encoder *dec = rq->encoder;
 
@@ -771,7 +772,10 @@ int nanorq_repair(nanorq *rq, void *src) {
   size_t num_gaps = compat_bitmask_gaps(&dec->repair_mask, dec->K);
   if (num_gaps == 0)
     return NANORQ_SYM_IGN;	// Because all source symbols exist, repair isn't needed.
-  if (dec->inverted) {	// When intermediate symbols were restored, it recovers all source symbols.
+  if (dec->inverted) {
+    if (!src)	// When intermediate symbols were generated and src is NULL, just exit.
+      return NANORQ_SYM_IGN;
+    // When intermediate symbols were restored, it recovers all source symbols.
     if (!ensure_mix_buf(dec))
       return NANORQ_SYM_ERR;
     write_recovered_block(rq, dec, src);
@@ -790,43 +794,13 @@ int nanorq_repair(nanorq *rq, void *src) {
   uint32_t first_oh = avail_oh > cap_oh ? cap_oh : avail_oh;
   bool rank_failed = false;
 
+  // When src is NULL, this doesn't repair source symbols.
   if (attempt_conventional_repair(rq, dec, src, first_oh, &rank_failed))
     return NANORQ_SYM_OK;
   if (rank_failed && first_oh < avail_oh){
     if (attempt_conventional_repair(rq, dec, src, avail_oh, &rank_failed))
       return NANORQ_SYM_OK;
   }
-  if (rank_failed)
-    return NANORQ_SYM_LACK;	// Failed to invert matrix. It may need more symbols.
-  return NANORQ_SYM_ERR;
-}
-
-// similar to nanorq_generate_symbols(), but this is used at decoding.
-int nanorq_regenerate_symbols(nanorq *rq) {
-  if (!rq)
-    return NANORQ_SYM_PARA;
-  struct block_encoder *dec = rq->encoder;
-
-  size_t conventional_count = dec->repair_bin.n;
-
-  size_t num_gaps = compat_bitmask_gaps(&dec->repair_mask, dec->K);
-  if (num_gaps == 0)
-    return NANORQ_SYM_IGN;	// Because all source symbols exist, repair isn't needed.
-  if (dec->inverted)
-    return NANORQ_SYM_OK;	// intermediate symbols were generated already.
-
-  if (conventional_count < num_gaps ||
-      conventional_count - num_gaps > UINT32_MAX)
-    return NANORQ_SYM_LACK;	// added symbols aren't enough for recovery.
-  if (!ensure_block_matrix(dec))
-    return NANORQ_SYM_ERR;
-
-  uint32_t overhead = (uint32_t)(conventional_count - num_gaps);
-  bool rank_failed = false;
-
-  // By setting NULL for src, call attempt_conventional_repair() without recovery.
-  if (attempt_conventional_repair(rq, dec, NULL, overhead, &rank_failed))
-    return NANORQ_SYM_OK;
   if (rank_failed)
     return NANORQ_SYM_LACK;	// Failed to invert matrix. It may need more symbols.
   return NANORQ_SYM_ERR;
@@ -841,7 +815,7 @@ int nanorq_restore_symbol(nanorq *rq, void *data, uint32_t esi) {
   struct block_encoder *dec = rq->encoder;
 
   if (!dec->inverted){	// check intermediate symbols
-    int success = nanorq_regenerate_symbols(rq);
+    int success = nanorq_repair(rq, NULL);
     if (success == NANORQ_SYM_ERR || success == NANORQ_SYM_LACK)
       return success;
   }
